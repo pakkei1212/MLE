@@ -15,7 +15,7 @@ from pyspark.sql.functions import col
 from pyspark.sql.types import StringType, IntegerType, FloatType, DateType
 
 
-def process_silver_table(snapshot_date_str, bronze_lms_directory, silver_loan_daily_directory, spark):
+def process_silver_loans(snapshot_date_str, bronze_lms_directory, silver_loan_daily_directory, spark):
     # prepare arguments
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
     
@@ -61,3 +61,90 @@ def process_silver_table(snapshot_date_str, bronze_lms_directory, silver_loan_da
     print('saved to:', filepath)
     
     return df
+
+def parse_credit_history_months(col):
+        # "15 Years and 10 Months" -> 190
+        years  = F.coalesce(F.regexp_extract(col, r'(\d+)\s+Years', 1).cast("int"), F.lit(0))
+        months = F.coalesce(F.regexp_extract(col, r'(\d+)\s+Months',1).cast("int"), F.lit(0))
+        return years * F.lit(12) + months
+        
+def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users_daily_directory, spark):
+    # prepare arguments
+    snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
+
+    #============================================
+    # clickstream
+    #============================================   
+    # connect to bronze table
+    partition_name = "bronze_users_clickstream_" + snapshot_date_str.replace('-','_') + '.csv'
+    filepath = bronze_users_directory + partition_name
+    clickstream_df = spark.read.csv(filepath, header=True, inferSchema=True)
+    print('loaded from:', filepath, 'row count:', clickstream_df.count())
+
+    # clean data: enforce schema / data type
+    # Dictionary specifying columns and their desired datatypes
+    column_type_map = {
+        **{f"fe_{i}": IntegerType() for i in range(1, 21)},
+        "Customer_ID": StringType(),
+        "snapshot_date": DateType(),
+    }
+
+    for column, new_type in column_type_map.items():
+        clickstream_df = clickstream_df.withColumn(column, col(column).cast(new_type))
+
+    # save silver table - IRL connect to database to write
+    partition_name = "silver_users_clickstream_" + snapshot_date_str.replace('-','_') + '.parquet'
+    filepath = silver_users_daily_directory + partition_name
+    clickstream_df.write.mode("overwrite").parquet(filepath)
+    # df.toPandas().to_parquet(filepath,
+    #           compression='gzip')
+    print('saved to:', filepath)
+
+    #============================================
+    # financials
+    #============================================  
+    # connect to bronze table
+    partition_name = "bronze_users_financials_" + snapshot_date_str.replace('-','_') + '.csv'
+    filepath = bronze_users_directory + partition_name
+    financials_df = spark.read.csv(filepath, header=True, inferSchema=True)
+    print('loaded from:', filepath, 'row count:', financials_df.count())
+
+    # clean data: enforce schema / data type
+    # Dictionary specifying columns and their desired datatypes
+    column_type_map = {
+        "Monthly_Inhand_Salary": FloatType(),
+        "Num_Bank_Accounts": IntegerType(),
+        "Num_Credit_Card": IntegerType(),
+        "Interest_Rate": FloatType(),
+        "Num_of_Loan": IntegerType(),
+        "Delay_from_due_date": IntegerType(),
+        "Num_of_Delayed_Payment": IntegerType(),
+        "Changed_Credit_Limit": FloatType(),
+        "Num_Credit_Inquiries": IntegerType(),
+        "Outstanding_Debt": FloatType(),
+        "Credit_Utilization_Ratio": FloatType(),
+        "Total_EMI_per_month": FloatType(),
+        "Amount_invested_monthly": FloatType(),
+        "Total_EMI_per_month": FloatType(),
+        "Monthly_Balance": FloatType(),
+        "Customer_ID": StringType(),
+        "snapshot_date": DateType(),
+    }
+
+    for column, new_type in column_type_map.items():
+        financials_df = financials_df.withColumn(column, col(column).cast(new_type))
+
+    # Type_of_Loan, Credit_Mix, Payment_Behaviour, Payment_of_Min_Amount
+    
+    financials_df = financials_df.withColumn("Annual_Income", F.regexp_replace("Annual_Income", "[^0-9.]", "").cast(FloatType()))
+    financials_df = financials_df.withColumn("Credit_History_Age", parse_credit_history_months(col("Credit_History_Age")).cast(IntegerType()))
+    # save silver table - IRL connect to database to write
+    partition_name = "silver_users_financials_" + snapshot_date_str.replace('-','_') + '.parquet'
+    filepath = silver_users_daily_directory + partition_name
+    financials_df.write.mode("overwrite").parquet(filepath)
+    # df.toPandas().to_parquet(filepath,
+    #           compression='gzip')
+    print('saved to:', filepath)
+    
+    return clickstream_df, financials_df
+    
