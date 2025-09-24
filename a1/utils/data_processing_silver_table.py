@@ -62,22 +62,109 @@ def process_silver_loans(snapshot_date_str, bronze_lms_directory, silver_loan_da
     
     return df
 
+# helper function to parse credit history age
 def parse_credit_history_months(col):
         # "15 Years and 10 Months" -> 190
         years  = F.coalesce(F.regexp_extract(col, r'(\d+)\s+Years', 1).cast("int"), F.lit(0))
         months = F.coalesce(F.regexp_extract(col, r'(\d+)\s+Months',1).cast("int"), F.lit(0))
         return years * F.lit(12) + months
+
+# Clean and standardize the Type_of_Loan field
+def clean_type_of_loan(df):
+    # Step 1: replace " and " with ","
+    df = df.withColumn("Type_of_Loan_clean",
+                       F.regexp_replace("Type_of_Loan", r"\s+and\s+", ","))
+    # Step 2: split on commas
+    df = df.withColumn("loan_array",
+                       F.split(F.col("Type_of_Loan_clean"), ","))
+    # Step 3: trim spaces
+    df = df.withColumn("loan_array",
+                       F.expr("transform(loan_array, x -> trim(x))"))
+    # Step 4: remove duplicates
+    df = df.withColumn("loan_array", F.array_distinct("loan_array"))
+    # Step 5: filter out junk like "Not Specified" or empty
+    df = df.withColumn("loan_array",
+                       F.expr("filter(loan_array, x -> x != 'Not Specified' and x != '')"))
+    # Step 6: re-join with consistent delimiter
+    df = df.withColumn("Type_of_Loan",
+                       F.array_join("loan_array", "|").cast(StringType()))
+
+    return df.drop("loan_array", "Type_of_Loan_clean")
         
-def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users_daily_directory, spark):
+def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze_attributes_directory, 
+                         bronze_financials_directory, silver_clickstream_directory, silver_attributes_directory,
+                         silver_financials_directory, spark):
     # prepare arguments
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
+
+    #============================================
+    # attributes
+    #============================================   
+    # connect to bronze table
+    partition_name = "bronze_users_attributes_" + snapshot_date_str.replace('-','_') + '.csv'
+    filepath = bronze_attributes_directory + partition_name
+    attributes_df = spark.read.csv(filepath, header=True, inferSchema=True)
+    print('loaded from:', filepath, 'row count:', attributes_df.count())
+
+    # clean data: enforce schema / data type
+    # Dictionary specifying columns and their desired datatypes
+    column_type_map = {
+        "Customer_ID": StringType(),
+        "snapshot_date": DateType(),
+    }
+
+    for column, new_type in column_type_map.items():
+        attributes_df = attributes_df.withColumn(column, col(column).cast(new_type))
+
+       # clean and standardize specific fields
+    attributes_df = attributes_df.withColumn("Name", F.initcap(F.trim(col("Name"))).cast(StringType()))
+    # Mask Name: keep first letter, mask rest with **
+    attributes_df = attributes_df.withColumn(
+        "Name_Masked",
+        F.concat(
+            F.substring("Name", 1, 1),  # keep first character
+            F.expr("repeat('*', length(Name) - 1)") # mask rest with *
+        ).cast(StringType())
+    )
+    
+    # Age: remove non-numeric characters, convert to integer, set invalid ages to null
+    attributes_df = attributes_df.withColumn("Age", F.regexp_replace("Age", "[^0-9\-]", ""))
+    attributes_df = attributes_df.withColumn("Age", F.when((col("Age") < 18) | (col("Age") > 120), F.lit(None))
+                                             .otherwise(col("Age")).cast(IntegerType()))
+    
+    # SSN: remove non-numeric and non-dash characters, convert to string, set invalid SSNs to null
+    attributes_df = attributes_df.withColumn("SSN", F.regexp_replace("SSN", "[^0-9\-]", ""))
+    attributes_df = attributes_df.withColumn("SSN", F.when(F.col("SSN").rlike("^\d{3}-\d{2}-\d{4}$"), 
+                                                           col("SSN")).otherwise(F.lit(None)).cast(StringType()))
+    
+    # Mask SSN: show only last 4 digits, mask rest with XXX-XX-
+    attributes_df = attributes_df.withColumn("SSN_Masked", F.concat(F.lit("XXX-XX-"), F.substring("SSN", -4, 4)))
+    
+    attributes_df = attributes_df.withColumn("Occupation", F.when(col("Occupation") == "_______", None)
+                                             .otherwise(col("Occupation")))
+    attributes_df = attributes_df.withColumn("Occupation", F.regexp_replace("Occupation", r"_", " "))
+    attributes_df = attributes_df.withColumn("Occupation", col("Occupation").cast(StringType()))
+
+    # create Hashed_User_ID as hash of Customer_ID + SSN
+    attributes_df = attributes_df.withColumn("Hashed_User_ID", F.sha2(F.concat_ws("||", col("Customer_ID"), col("SSN")), 256))
+
+    #attributes_df = attributes_df.drop("Name", "SSN")
+
+    
+    # save silver table - IRL connect to database to write
+    partition_name = "silver_users_attributes_" + snapshot_date_str.replace('-','_') + '.parquet'
+    filepath = silver_attributes_directory + partition_name
+    attributes_df.write.mode("overwrite").parquet(filepath)
+    # df.toPandas().to_parquet(filepath,
+    #           compression='gzip')
+    print('saved to:', filepath)
 
     #============================================
     # clickstream
     #============================================   
     # connect to bronze table
     partition_name = "bronze_users_clickstream_" + snapshot_date_str.replace('-','_') + '.csv'
-    filepath = bronze_users_directory + partition_name
+    filepath = bronze_clickstream_directory + partition_name
     clickstream_df = spark.read.csv(filepath, header=True, inferSchema=True)
     print('loaded from:', filepath, 'row count:', clickstream_df.count())
 
@@ -91,10 +178,10 @@ def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users
 
     for column, new_type in column_type_map.items():
         clickstream_df = clickstream_df.withColumn(column, col(column).cast(new_type))
-
+ 
     # save silver table - IRL connect to database to write
-    partition_name = "silver_users_clickstream_" + snapshot_date_str.replace('-','_') + '.parquet'
-    filepath = silver_users_daily_directory + partition_name
+    partition_name = "silver_users_clickstream_df_" + snapshot_date_str.replace('-','_') + '.parquet'
+    filepath = silver_clickstream_directory + partition_name
     clickstream_df.write.mode("overwrite").parquet(filepath)
     # df.toPandas().to_parquet(filepath,
     #           compression='gzip')
@@ -105,7 +192,7 @@ def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users
     #============================================  
     # connect to bronze table
     partition_name = "bronze_users_financials_" + snapshot_date_str.replace('-','_') + '.csv'
-    filepath = bronze_users_directory + partition_name
+    filepath = bronze_financials_directory + partition_name
     financials_df = spark.read.csv(filepath, header=True, inferSchema=True)
     print('loaded from:', filepath, 'row count:', financials_df.count())
 
@@ -116,17 +203,11 @@ def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users
         "Num_Bank_Accounts": IntegerType(),
         "Num_Credit_Card": IntegerType(),
         "Interest_Rate": FloatType(),
-        "Num_of_Loan": IntegerType(),
         "Delay_from_due_date": IntegerType(),
-        "Num_of_Delayed_Payment": IntegerType(),
-        "Changed_Credit_Limit": FloatType(),
         "Num_Credit_Inquiries": IntegerType(),
-        "Outstanding_Debt": FloatType(),
         "Credit_Utilization_Ratio": FloatType(),
+        #"Amount_invested_monthly": FloatType(),
         "Total_EMI_per_month": FloatType(),
-        "Amount_invested_monthly": FloatType(),
-        "Total_EMI_per_month": FloatType(),
-        "Monthly_Balance": FloatType(),
         "Customer_ID": StringType(),
         "snapshot_date": DateType(),
     }
@@ -134,17 +215,49 @@ def process_silver_users(snapshot_date_str, bronze_users_directory, silver_users
     for column, new_type in column_type_map.items():
         financials_df = financials_df.withColumn(column, col(column).cast(new_type))
 
-    # Type_of_Loan, Credit_Mix, Payment_Behaviour, Payment_of_Min_Amount
+    # clean and standardize specific fields
+    financials_df = financials_df.withColumn("Annual_Income", F.regexp_replace("Annual_Income", "[^0-9.\-]", "").cast(FloatType()))
+    financials_df = financials_df.withColumn("Num_of_Loan", F.regexp_replace("Num_of_Loan", "[^0-9.\-]", "").cast(IntegerType()))
+    financials_df = clean_type_of_loan(financials_df)
     
-    financials_df = financials_df.withColumn("Annual_Income", F.regexp_replace("Annual_Income", "[^0-9.]", "").cast(FloatType()))
+    financials_df = financials_df.withColumn("Num_of_Delayed_Payment", F.regexp_replace("Num_of_Delayed_Payment", "[^0-9.\-]", "").cast(IntegerType()))
+    financials_df = financials_df.withColumn("Changed_Credit_Limit", F.regexp_replace("Changed_Credit_Limit", "[^0-9.\-]", "").cast(FloatType()))
+    financials_df = financials_df.withColumn("Credit_Mix", F.when(col("Credit_Mix") == "Good", F.lit("Good")) \
+                                                                         .when(col("Credit_Mix") == "Standard", F.lit("Standard")) \
+                                                                         .when(col("Credit_Mix") == "Bad", F.lit("Bad")) \
+                                                                         .otherwise(None).cast(StringType()))
+    financials_df = financials_df.withColumn("Outstanding_Debt", F.regexp_replace("Outstanding_Debt", "[^0-9.\-]", "").cast(FloatType()))
+    financials_df = financials_df.withColumn("Payment_of_Min_Amount", F.when(col("Payment_of_Min_Amount").isin("No", "NM"), F.lit("N")) \
+                                                                         .when(col("Payment_of_Min_Amount") == "Yes", F.lit("Y")) \
+                                                                         .otherwise(None).cast(StringType()))
+    financials_df = financials_df.withColumn("Amount_invested_monthly", F.regexp_replace("Amount_invested_monthly", "[^0-9.\-]", "").cast(FloatType()))
+    
+    # parse Credit_History_Age to months (e.g. '16 Years and 3 Months' -> 195)
     financials_df = financials_df.withColumn("Credit_History_Age", parse_credit_history_months(col("Credit_History_Age")).cast(IntegerType()))
+    
+    # parse Payment_Behaviour into two fields: Spent (Low/High) and Payment (Small/Medium/Large)
+    financials_df = financials_df.withColumn("Payment_Behaviour_Spent", F.when(col("Payment_Behaviour").rlike("(?i)^Low_spent"), F.lit("Low")) \
+                                                                         .when(col("Payment_Behaviour").rlike("(?i)^High_spent"), F.lit("High")) \
+                                                                         .otherwise(None).cast(StringType()))    
+    financials_df = financials_df.withColumn("Payment_Behaviour_Payment", F.when(col("Payment_Behaviour").rlike("(?i)Large_value_payments"), F.lit("Large")) \
+                                                                         .when(col("Payment_Behaviour").rlike("(?i)Medium_value_payments"), F.lit("Medium")) \
+                                                                         .when(col("Payment_Behaviour").rlike("(?i)Small_value_payments"), F.lit("Small")) \
+                                                                         .otherwise(None).cast(StringType()))                                                                      
+
+    financials_df = financials_df.drop("Payment_Behaviour")
+
+    financials_df = financials_df.withColumn("Monthly_Balance", F.regexp_replace("Monthly_Balance", "[^0-9.\-]", "").cast(FloatType()))
+
+     # select columns to save
+    #financials_df = financials_df.select("loan_id", "Customer_ID", "label", "label_def", "snapshot_date")
+ 
     # save silver table - IRL connect to database to write
     partition_name = "silver_users_financials_" + snapshot_date_str.replace('-','_') + '.parquet'
-    filepath = silver_users_daily_directory + partition_name
+    filepath = silver_financials_directory + partition_name
     financials_df.write.mode("overwrite").parquet(filepath)
     # df.toPandas().to_parquet(filepath,
     #           compression='gzip')
     print('saved to:', filepath)
     
-    return clickstream_df, financials_df
+    return clickstream_df, attributes_df, financials_df
     

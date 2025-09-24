@@ -20,7 +20,7 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, go
     # prepare arguments
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
     
-    # connect to bronze table
+    # connect to silver table
     partition_name = "silver_loan_daily_" + snapshot_date_str.replace('-','_') + '.parquet'
     filepath = silver_loan_daily_directory + partition_name
     df = spark.read.parquet(filepath)

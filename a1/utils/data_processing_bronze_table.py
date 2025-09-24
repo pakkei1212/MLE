@@ -32,7 +32,8 @@ def process_bronze_loans(snapshot_date_str, bronze_lms_directory, spark, csv_fil
     return df
 
 # Users bronze (if clickstream has a date column, pass its name; else leave None)
-def process_bronze_users(snapshot_date_str, bronze_users_directory, spark, clickstream_csv="data/feature_clickstream.csv", 
+def process_bronze_users(snapshot_date_str, bronze_clickstream_directory, bronze_attributes_directory, 
+                         bronze_financials_directory, spark, clickstream_csv="data/feature_clickstream.csv", 
                          attributes_csv="data/features_attributes.csv", financials_csv="data/features_financials.csv"):
     # prepare arguments
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
@@ -45,7 +46,7 @@ def process_bronze_users(snapshot_date_str, bronze_users_directory, spark, click
     print(snapshot_date_str + " row count (clickstream):", clickstream_df.count())
 
     partition_name = "bronze_users_clickstream_" + snapshot_date_str.replace("-", "_") + ".csv"
-    filepath = bronze_users_directory + partition_name
+    filepath = bronze_clickstream_directory + partition_name
     clickstream_df.toPandas().to_csv(filepath, index=False)
     print("saved to:", filepath)
 
@@ -57,7 +58,7 @@ def process_bronze_users(snapshot_date_str, bronze_users_directory, spark, click
     print(snapshot_date_str + " row count (attributes):", attributes_df.count())
 
     partition_name = "bronze_users_attributes_" + snapshot_date_str.replace("-", "_") + ".csv"
-    filepath = bronze_users_directory + partition_name
+    filepath = bronze_attributes_directory + partition_name
     attributes_df.toPandas().to_csv(filepath, index=False)
     print("saved to:", filepath)
 
@@ -69,7 +70,7 @@ def process_bronze_users(snapshot_date_str, bronze_users_directory, spark, click
     print(snapshot_date_str + " row count (financials):", financials_df.count())
 
     partition_name = "bronze_users_financials_" + snapshot_date_str.replace("-", "_") + ".csv"
-    filepath = bronze_users_directory + partition_name
+    filepath = bronze_financials_directory + partition_name
     financials_df.toPandas().to_csv(filepath, index=False)
     print("saved to:", filepath)
 
