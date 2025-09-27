@@ -116,7 +116,7 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     for column, new_type in column_type_map.items():
         attributes_df = attributes_df.withColumn(column, col(column).cast(new_type))
 
-       # clean and standardize specific fields
+    # clean and standardize specific fields
     attributes_df = attributes_df.withColumn("Name", F.initcap(F.trim(col("Name"))).cast(StringType()))
     # Mask Name: keep first letter, mask rest with **
     attributes_df = attributes_df.withColumn(
@@ -146,7 +146,7 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     attributes_df = attributes_df.withColumn("Occupation", col("Occupation").cast(StringType()))
 
     # create Hashed_User_ID as hash of Customer_ID + SSN
-    attributes_df = attributes_df.withColumn("Hashed_User_ID", F.sha2(F.concat_ws("||", col("Customer_ID"), col("SSN")), 256))
+    # attributes_df = attributes_df.withColumn("Hashed_User_ID", F.sha2(F.concat_ws("||", col("Customer_ID"), col("SSN")), 256))
 
     #attributes_df = attributes_df.drop("Name", "SSN")
 
@@ -180,7 +180,7 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
         clickstream_df = clickstream_df.withColumn(column, col(column).cast(new_type))
  
     # save silver table - IRL connect to database to write
-    partition_name = "silver_users_clickstream_df_" + snapshot_date_str.replace('-','_') + '.parquet'
+    partition_name = "silver_users_clickstream_" + snapshot_date_str.replace('-','_') + '.parquet'
     filepath = silver_clickstream_directory + partition_name
     clickstream_df.write.mode("overwrite").parquet(filepath)
     # df.toPandas().to_parquet(filepath,
@@ -200,13 +200,8 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     # Dictionary specifying columns and their desired datatypes
     column_type_map = {
         "Monthly_Inhand_Salary": FloatType(),
-        "Num_Bank_Accounts": IntegerType(),
-        "Num_Credit_Card": IntegerType(),
-        "Interest_Rate": FloatType(),
         "Delay_from_due_date": IntegerType(),
-        "Num_Credit_Inquiries": IntegerType(),
         "Credit_Utilization_Ratio": FloatType(),
-        #"Amount_invested_monthly": FloatType(),
         "Total_EMI_per_month": FloatType(),
         "Customer_ID": StringType(),
         "snapshot_date": DateType(),
@@ -217,24 +212,54 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
 
     # clean and standardize specific fields
     financials_df = financials_df.withColumn("Annual_Income", F.regexp_replace("Annual_Income", "[^0-9.\-]", "").cast(FloatType()))
+
+    financials_df = financials_df.withColumn("Num_Bank_Accounts", F.when((col("Num_Bank_Accounts") < 0) | \
+                                                                         (col("Num_Bank_Accounts") > 50), None) \
+                                                                         .otherwise(col("Num_Bank_Accounts")).cast(IntegerType()))
+    
+    financials_df = financials_df.withColumn("Num_Credit_Card", F.when((col("Num_Credit_Card") < 0) | \
+                                                                       (col("Num_Credit_Card") > 20), None) \
+                                                                        .otherwise(col("Num_Credit_Card")).cast(IntegerType()))
+    
+    financials_df = financials_df.withColumn("Interest_Rate", F.when((col("Interest_Rate") < 0) | \
+                                                                     (col("Interest_Rate") > 100), None) \
+                                                                     .otherwise(F.col("Interest_Rate")).cast(FloatType()))
+    
     financials_df = financials_df.withColumn("Num_of_Loan", F.regexp_replace("Num_of_Loan", "[^0-9.\-]", "").cast(IntegerType()))
+    financials_df = financials_df.withColumn("Num_of_Loan", F.when((col("Num_of_Loan") < 0) | (col("Num_of_Loan") > 20), None)
+                                                             .otherwise(col("Num_of_Loan")).cast(IntegerType()))
+
     financials_df = clean_type_of_loan(financials_df)
     
+    financials_df = financials_df.withColumn("Num_Credit_Inquiries", F.when((col("Num_Credit_Inquiries") < 0) | \
+                                                                            (col("Num_Credit_Inquiries") > 50), None) \
+                                                                            .otherwise(col("Num_Credit_Inquiries")).cast(IntegerType()))
+
     financials_df = financials_df.withColumn("Num_of_Delayed_Payment", F.regexp_replace("Num_of_Delayed_Payment", "[^0-9.\-]", "").cast(IntegerType()))
+    financials_df = financials_df.withColumn("Num_of_Delayed_Payment", F.when((col("Num_of_Delayed_Payment") < 0) | \
+                                                                              (col("Num_of_Delayed_Payment") > 100), None)
+                                                                              .otherwise(col("Num_of_Delayed_Payment")).cast(IntegerType()))
+    
     financials_df = financials_df.withColumn("Changed_Credit_Limit", F.regexp_replace("Changed_Credit_Limit", "[^0-9.\-]", "").cast(FloatType()))
+
     financials_df = financials_df.withColumn("Credit_Mix", F.when(col("Credit_Mix") == "Good", F.lit("Good")) \
                                                                          .when(col("Credit_Mix") == "Standard", F.lit("Standard")) \
                                                                          .when(col("Credit_Mix") == "Bad", F.lit("Bad")) \
                                                                          .otherwise(None).cast(StringType()))
+    
     financials_df = financials_df.withColumn("Outstanding_Debt", F.regexp_replace("Outstanding_Debt", "[^0-9.\-]", "").cast(FloatType()))
-    financials_df = financials_df.withColumn("Payment_of_Min_Amount", F.when(col("Payment_of_Min_Amount").isin("No", "NM"), F.lit("N")) \
-                                                                         .when(col("Payment_of_Min_Amount") == "Yes", F.lit("Y")) \
+    financials_df = financials_df.withColumn("Payment_of_Min_Amount", F.when(col("Payment_of_Min_Amount").isin("No", "NM"), F.lit("No")) \
+                                                                         .when(col("Payment_of_Min_Amount") == "Yes", F.lit("Yes")) \
                                                                          .otherwise(None).cast(StringType()))
+    
     financials_df = financials_df.withColumn("Amount_invested_monthly", F.regexp_replace("Amount_invested_monthly", "[^0-9.\-]", "").cast(FloatType()))
     
     # parse Credit_History_Age to months (e.g. '16 Years and 3 Months' -> 195)
     financials_df = financials_df.withColumn("Credit_History_Age", parse_credit_history_months(col("Credit_History_Age")).cast(IntegerType()))
     
+    financials_df = financials_df.withColumn("Total_EMI_per_month", F.when(col("Total_EMI_per_month") < 0, None) \
+                                 .otherwise(col("Total_EMI_per_month")).cast(FloatType()))
+
     # parse Payment_Behaviour into two fields: Spent (Low/High) and Payment (Small/Medium/Large)
     financials_df = financials_df.withColumn("Payment_Behaviour_Spent", F.when(col("Payment_Behaviour").rlike("(?i)^Low_spent"), F.lit("Low")) \
                                                                          .when(col("Payment_Behaviour").rlike("(?i)^High_spent"), F.lit("High")) \
