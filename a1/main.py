@@ -138,6 +138,11 @@ print("row_count:",df.count())
 
 df.show()
 
+# end spark session
+spark.stop()
+
+print('\n\n---completed job---\n\n')
+
 
 
     
