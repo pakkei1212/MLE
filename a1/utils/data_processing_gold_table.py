@@ -57,7 +57,7 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
     folder_path = silver_clickstream_directory
     files_list = [folder_path+os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
     clickstream_df = spark.read.option("header", "true").parquet(*files_list)
-    #print('loaded from:', files_list, 'row count:', clickstream_df.count())
+    print('loaded from:', files_list, 'row count:', clickstream_df.count())
 
     feature_cols = [F.col(f"scd.fe_{i}") for i in range(1, 21)]
 
@@ -84,7 +84,7 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
     folder_path = silver_attributes_directory
     files_list = [folder_path+os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
     attributes_df = spark.read.option("header", "true").parquet(*files_list)
-    #print('loaded from:', files_list, 'row count:', attributes_df.count())
+    print('loaded from:', files_list, 'row count:', attributes_df.count())
 
     # join with loans to filter only users with loans and before label snapshot date
     attributes_df = (
@@ -121,7 +121,7 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
     folder_path = silver_financials_directory
     files_list = [folder_path+os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
     financials_df = spark.read.option("header", "true").parquet(*files_list)
-    #print('loaded from:', files_list, 'row count:', financials_df.count())
+    print('loaded from:', files_list, 'row count:', financials_df.count())
 
     financials_df = (
         financials_df.alias("sfd")
@@ -249,13 +249,13 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
 
     # Define the order explicitly
     ordered_cols = [
-        # 1. Keys / metadata
+        # Keys / metadata
         "Customer_ID", "label_snapshot_date",
         
-        # 2. Attributes
+        # Attributes
         "Age_bin", "Occupation", "attributes_snapshot_date",
         
-        # 3. Financials (raw numeric + engineered ratios)
+        # Financials (raw numeric + engineered ratios)
         "Annual_Income", "Monthly_Inhand_Salary",
         "Num_Bank_Accounts", "Num_Credit_Card", "Num_of_Loan", "Type_of_Loan",
         "Interest_Rate", "Delay_from_due_date", "Num_of_Delayed_Payment",
@@ -264,17 +264,17 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
         "Total_EMI_per_month", "Amount_invested_monthly", "Monthly_Balance",
         "financials_snapshot_date",
         
-        # 4. Encoded categorical features
+        # Encoded categorical features
         "Credit_Mix_Enc", 
         "Payment_of_Min_Amount_Enc",
         "Payment_Behaviour_Spent_Enc", 
         "Payment_Behaviour_Payment_Enc",
         
-        # 5. Engineered ratios
+        # Engineered ratios
         "emi_to_income_ratio", "debt_to_income_ratio", 
         "avg_delay", "balance_to_income_ratio",
         
-        # 6. Flags
+        # Flags
         "high_credit_inquiry_flag", "high_utilization_flag",
         "high_emi_burden_flag", "negative_balance_flag"
     ]
@@ -297,5 +297,6 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, si
     print("Clickstream:", clickstream_df.count())
     print("Attributes:", attributes_df.count())
     print("Financials:", financials_df.count())
+    print("Features:", feature_df.count())
     
     return loans_df, feature_df

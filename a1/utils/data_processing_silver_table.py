@@ -71,21 +71,21 @@ def parse_credit_history_months(col):
 
 # Clean and standardize the Type_of_Loan field
 def clean_type_of_loan(df):
-    # Step 1: replace " and " with ","
+    # replace " and " with ","
     df = df.withColumn("Type_of_Loan_clean",
                        F.regexp_replace("Type_of_Loan", r"\s+and\s+", ","))
-    # Step 2: split on commas
+    # split on commas
     df = df.withColumn("loan_array",
                        F.split(F.col("Type_of_Loan_clean"), ","))
-    # Step 3: trim spaces
+    # trim spaces
     df = df.withColumn("loan_array",
                        F.expr("transform(loan_array, x -> trim(x))"))
-    # Step 4: remove duplicates
+    # remove duplicates
     df = df.withColumn("loan_array", F.array_distinct("loan_array"))
-    # Step 5: filter out junk like "Not Specified" or empty
+    # filter out junk like "Not Specified" or empty
     df = df.withColumn("loan_array",
                        F.expr("filter(loan_array, x -> x != 'Not Specified' and x != '')"))
-    # Step 6: re-join with consistent delimiter
+    # re-join with consistent delimiter
     df = df.withColumn("Type_of_Loan",
                        F.array_join("loan_array", "|").cast(StringType()))
 
@@ -155,8 +155,6 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     partition_name = "silver_users_attributes_" + snapshot_date_str.replace('-','_') + '.parquet'
     filepath = silver_attributes_directory + partition_name
     attributes_df.write.mode("overwrite").parquet(filepath)
-    # df.toPandas().to_parquet(filepath,
-    #           compression='gzip')
     print('saved to:', filepath)
 
     #============================================
@@ -183,8 +181,6 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     partition_name = "silver_users_clickstream_" + snapshot_date_str.replace('-','_') + '.parquet'
     filepath = silver_clickstream_directory + partition_name
     clickstream_df.write.mode("overwrite").parquet(filepath)
-    # df.toPandas().to_parquet(filepath,
-    #           compression='gzip')
     print('saved to:', filepath)
 
     #============================================
@@ -269,8 +265,10 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
                                                                          .when(col("Payment_Behaviour").rlike("(?i)Small_value_payments"), F.lit("Small")) \
                                                                          .otherwise(None).cast(StringType()))                                                                      
 
+    # drop original Payment_Behaviour column
     financials_df = financials_df.drop("Payment_Behaviour")
 
+    # clean Monthly_Balance: remove non-numeric characters, convert to float
     financials_df = financials_df.withColumn("Monthly_Balance", F.regexp_replace("Monthly_Balance", "[^0-9.\-]", "").cast(FloatType()))
 
      # select columns to save
@@ -280,8 +278,6 @@ def process_silver_users(snapshot_date_str, bronze_clickstream_directory, bronze
     partition_name = "silver_users_financials_" + snapshot_date_str.replace('-','_') + '.parquet'
     filepath = silver_financials_directory + partition_name
     financials_df.write.mode("overwrite").parquet(filepath)
-    # df.toPandas().to_parquet(filepath,
-    #           compression='gzip')
     print('saved to:', filepath)
     
     return clickstream_df, attributes_df, financials_df

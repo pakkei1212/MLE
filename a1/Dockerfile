@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # RUN pip install pyspark
 
 # Expose the default JupyterLab port
-EXPOSE 8889
+EXPOSE 8888
 
 # Create a volume mount point for notebooks
 VOLUME /app
@@ -44,4 +44,4 @@ VOLUME /app
 ENV JUPYTER_ENABLE_LAB=yes
 
 # Set up the command to run JupyterLab
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8889", "--no-browser", "--allow-root", "--notebook-dir=/app"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--notebook-dir=/app"]
