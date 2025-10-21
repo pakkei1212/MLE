@@ -172,6 +172,8 @@ cython_debug/
 
 # data
 *.csv
+*.pdf.
+*.zip
 
 # mac
 .DS_Store
