@@ -1,5 +1,5 @@
 # Pin both Airflow and Python version explicitly
-FROM apache/airflow:2.6.1-python3.10
+FROM apache/airflow:2.9.3-python3.10
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,6 +11,7 @@ RUN set -euxo pipefail; \
       apt-get update && break || sleep 5; \
     done; \
     apt-get install -y --no-install-recommends \
+        libgomp1 \
         openjdk-17-jre-headless \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -40,10 +41,22 @@ COPY requirements.txt ./
 # ---- Python deps (airflow user) ----
 USER airflow
 
-# Install Python dependencies (ensure that pyspark is in your requirements.txt,
-# or you can install it explicitly by uncommenting the next line)
-RUN pip install --no-cache-dir -r requirements.txt
-# RUN pip install pyspark
+# Remove any preinstalled pyarrow that might be from the base image
+RUN pip uninstall -y pyarrow || true
+
+# Upgrade pip tooling, then install *fresh* wheels that are compatible with NumPy 2
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r /app/requirements.txt 
+
+# Build-time import sanity check to fail fast if ABI mismatch persists
+RUN python - <<'PY'
+import numpy as np, pandas as pd, sklearn, xgboost, scipy
+print("NumPy:", np.__version__)
+print("pandas:", pd.__version__)
+print("sklearn:", sklearn.__version__)
+print("xgboost:", xgboost.__version__)
+print("scipy:", scipy.__version__)
+PY
 
 # Expose the default JupyterLab port
 EXPOSE 8888

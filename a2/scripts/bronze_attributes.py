@@ -20,7 +20,7 @@ def main(snapshotdate):
     bronze_attributes_directory = os.path.join("datamart", "bronze", "users", "attributes") + "/"
     os.makedirs(bronze_attributes_directory, exist_ok=True)
 
-    utils.data_processing_bronze_table.process_bronze_attributes(
+    utils.data_processing_bronze_table.process_bronze_users_attributes(
         date_str, bronze_attributes_directory, spark
         # , attributes_csv="data/features_attributes.csv"  # optional override
     )

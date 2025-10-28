@@ -23,7 +23,7 @@ def main(snapshotdate):
     os.makedirs(bronze_clickstream_directory, exist_ok=True)
 
     # Run processing
-    utils.data_processing_bronze_table.process_bronze_clickstream(
+    utils.data_processing_bronze_table.process_bronze_users_clickstream(
         date_str, bronze_clickstream_directory, spark
         # , clickstream_csv="data/feature_clickstream.csv"  # optional override
     )

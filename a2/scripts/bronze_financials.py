@@ -20,7 +20,7 @@ def main(snapshotdate):
     bronze_financials_directory = os.path.join("datamart", "bronze", "users", "financials") + "/"
     os.makedirs(bronze_financials_directory, exist_ok=True)
 
-    utils.data_processing_bronze_table.process_bronze_financials(
+    utils.data_processing_bronze_table.process_bronze_users_financials(
         date_str, bronze_financials_directory, spark
         # , financials_csv="data/features_financials.csv"  # optional override
     )

@@ -6,6 +6,11 @@ import pyspark.sql.functions as F
 from pyspark.sql.functions import col
 from pyspark.sql.types import StringType, IntegerType, FloatType
 
+
+def _silver_part(snapshot_date_str: str, prefix: str) -> str:
+    # e.g. prefix='silver_clickstream_' -> 'silver_clickstream_2023_03_01.parquet'
+    return f"{prefix}{snapshot_date_str.replace('-', '_')}.parquet"
+
 def _read_all_parquet(spark, folder_path: str):
     files_list = [folder_path + os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
     if not files_list:
@@ -54,7 +59,188 @@ def build_gold_label_store(snapshot_date_str,
 # ------------------------------
 # B) FEATURE STORE (Gold)
 # ------------------------------
-def build_gold_feature_store(snapshot_date_str,
+def build_gold_feature_clickstream(snapshot_date_str: str,
+                                   silver_clickstream_directory: str,
+                                   gold_feature_store_directory: str,
+                                   spark):
+    """
+    Read the single Silver clickstream parquet for the snapshot date (no aggregation),
+    and write a Gold clickstream feature table for the same date.
+    Input file name expected:
+        {silver_clickstream_directory}/silver_clickstream_YYYY_MM_DD.parquet
+    Output file name:
+        {gold_feature_store_directory}/gold_feature_clickstream_YYYY_MM_DD.parquet
+    """
+    _ = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
+
+    part = "silver_users_clickstream_" + snapshot_date_str.replace('-', '_') + ".parquet"
+    src_path = os.path.join(silver_clickstream_directory, part)
+
+    cs_df = spark.read.parquet(src_path)
+    print('loaded from:', src_path, 'row count:', cs_df.count())
+
+    # Ensure we keep Customer_ID and all fe_* columns as-is; add a feature_snapshot_date marker.
+    fe_cols = [c for c in cs_df.columns if c.startswith("fe_")]
+    keep_cols = ["Customer_ID", "snapshot_date"] + fe_cols
+    cs_out = (
+        cs_df.select(*keep_cols)
+             .withColumn("feature_snapshot_date", F.to_date(F.lit(snapshot_date_str), "yyyy-MM-dd"))
+    )
+
+    out_name = f"gold_feature_clickstream_{snapshot_date_str.replace('-', '_')}.parquet"
+    out_path = os.path.join(gold_feature_store_directory, out_name)
+    cs_out.write.mode("overwrite").parquet(out_path)
+    print(f"[Gold-Clickstream] rows={cs_out.count()} saved={out_path}")
+    return cs_out
+
+
+def build_gold_feature_attributes(snapshot_date_str: str,
+                                  silver_attributes_directory: str,
+                                  gold_feature_store_directory: str,
+                                  spark):
+    """
+    Read the single Silver attributes parquet for the snapshot date (no aggregation),
+    bin Age, keep Occupation, and write Gold attributes.
+    Input:
+        {silver_attributes_directory}/silver_attributes_YYYY_MM_DD.parquet
+    Output:
+        {gold_feature_store_directory}/gold_feature_attributes_YYYY_MM_DD.parquet
+    """
+    _ = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
+    part = _silver_part(snapshot_date_str, "silver_users_attributes_")
+    src_path = os.path.join(silver_attributes_directory, part)
+
+    attr_df = spark.read.parquet(src_path).select("Customer_ID", "Age", "Occupation", "snapshot_date")
+    attr_out = (
+        attr_df
+        .withColumn(
+            "Age_bin",
+            F.when(col("Age") < 18, "under_18")
+             .when((col("Age") >= 18) & (col("Age") < 25), "18_24")
+             .when((col("Age") >= 25) & (col("Age") < 35), "25_34")
+             .when((col("Age") >= 35) & (col("Age") < 50), "35_49")
+             .when((col("Age") >= 50) & (col("Age") < 65), "50_64")
+             .when((col("Age") >= 65), "65_plus")
+             .otherwise(None)
+        )
+    )
+
+    out_name = f"gold_feature_attributes_{snapshot_date_str.replace('-', '_')}.parquet"
+    out_path = os.path.join(gold_feature_store_directory, out_name)
+    attr_out.write.mode("overwrite").parquet(out_path)
+    print(f"[Gold-Attributes] rows={attr_out.count()} saved={out_path}")
+    return attr_out
+
+
+def build_gold_feature_financials(snapshot_date_str: str,
+                                  silver_financials_directory: str,
+                                  gold_feature_store_directory: str,
+                                  spark):
+    """
+    Read the single Silver financials parquet for the snapshot date (no aggregation),
+    apply encodings, ratios, and flags; then write Gold financials.
+    Input:
+        {silver_financials_directory}/silver_financials_YYYY_MM_DD.parquet
+    Output:
+        {gold_feature_store_directory}/gold_feature_financials_YYYY_MM_DD.parquet
+    """
+    _ = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
+    part = _silver_part(snapshot_date_str, "silver_users_financials_")
+    src_path = os.path.join(silver_financials_directory, part)
+
+    fin_df = spark.read.parquet(src_path).select(
+        "Customer_ID",
+        "Annual_Income", "Monthly_Inhand_Salary",
+        "Num_Bank_Accounts", "Num_Credit_Card",
+        "Interest_Rate", "Num_of_Loan", "Type_of_Loan",
+        "Delay_from_due_date", "Num_of_Delayed_Payment",
+        "Changed_Credit_Limit", "Num_Credit_Inquiries",
+        "Credit_Mix", "Outstanding_Debt",
+        "Credit_Utilization_Ratio", "Credit_History_Age",
+        "Payment_of_Min_Amount", "Total_EMI_per_month",
+        "Amount_invested_monthly", "Monthly_Balance",
+        "Payment_Behaviour_Spent", "Payment_Behaviour_Payment",
+        "snapshot_date"
+    )
+
+    fin_feat = (
+        fin_df        
+        # Encodings
+        .withColumn(
+            "Credit_Mix_Enc",
+            F.when(col("Credit_Mix") == "Bad", 0)
+             .when(col("Credit_Mix") == "Standard", 1)
+             .when(col("Credit_Mix") == "Good", 2)
+             .otherwise(None).cast(IntegerType())
+        )
+        .withColumn(
+            "Payment_Behaviour_Spent_Enc",
+            F.when(col("Payment_Behaviour_Spent") == "Low", 0)
+             .when(col("Payment_Behaviour_Spent") == "High", 1)
+             .otherwise(None).cast(IntegerType())
+        )
+        .withColumn(
+            "Payment_Behaviour_Payment_Enc",
+            F.when(col("Payment_Behaviour_Payment") == "Small", 0)
+             .when(col("Payment_Behaviour_Payment") == "Medium", 1)
+             .when(col("Payment_Behaviour_Payment") == "Large", 2)
+             .otherwise(None).cast(IntegerType())
+        )
+        .withColumn(
+            "Payment_of_Min_Amount_Enc",
+            F.when(col("Payment_of_Min_Amount") == "Yes", 1)
+             .when(col("Payment_of_Min_Amount") == "No", 0)
+             .otherwise(None).cast(IntegerType())
+        )
+        # Ratios
+        .withColumn(
+            "avg_delay",
+            F.when(col("Num_of_Loan") > 0, col("Delay_from_due_date") / col("Num_of_Loan")).otherwise(None)
+        )
+        .withColumn(
+            "balance_to_income_ratio",
+            F.when(col("Annual_Income") > 0, col("Monthly_Balance") / (col("Annual_Income") / 12)).otherwise(None)
+        )
+        .withColumn(
+            "emi_to_income_ratio",
+            F.when(col("Annual_Income") > 0, col("Total_EMI_per_month") / (col("Annual_Income") / 12)).otherwise(None)
+        )
+        .withColumn(
+            "debt_to_income_ratio",
+            F.when(col("Annual_Income") > 0, col("Outstanding_Debt") / col("Annual_Income")).otherwise(None)
+        )
+        # Flags
+        .withColumn("high_credit_inquiry_flag", F.when(col("Num_Credit_Inquiries") > 10, 1).otherwise(0))
+        .withColumn("high_utilization_flag",     F.when(col("Credit_Utilization_Ratio") > 0.8, 1).otherwise(0))
+        .withColumn("high_emi_burden_flag",      F.when(col("emi_to_income_ratio") > 0.5, 1).otherwise(0))
+        .withColumn("negative_balance_flag",     F.when(col("Monthly_Balance") < 0, 1).otherwise(0))
+    )
+
+    fin_cols = [
+        "Customer_ID", "snapshot_date",
+        "Annual_Income", "Monthly_Inhand_Salary",
+        "Num_Bank_Accounts", "Num_Credit_Card", "Num_of_Loan", "Type_of_Loan",
+        "Interest_Rate", "Delay_from_due_date", "Num_of_Delayed_Payment",
+        "Changed_Credit_Limit", "Num_Credit_Inquiries",
+        "Outstanding_Debt", "Credit_Utilization_Ratio", "Credit_History_Age",
+        "Total_EMI_per_month", "Amount_invested_monthly", "Monthly_Balance",
+        "Credit_Mix", "Payment_of_Min_Amount", "Payment_Behaviour_Spent", "Payment_Behaviour_Payment",
+        "Credit_Mix_Enc", "Payment_of_Min_Amount_Enc",
+        "Payment_Behaviour_Spent_Enc", "Payment_Behaviour_Payment_Enc",
+        "emi_to_income_ratio", "debt_to_income_ratio",
+        "avg_delay", "balance_to_income_ratio",
+        "high_credit_inquiry_flag", "high_utilization_flag",
+        "high_emi_burden_flag", "negative_balance_flag",
+    ]
+    fin_out = fin_feat.select(*fin_cols)
+
+    out_name = f"gold_feature_financials_{snapshot_date_str.replace('-', '_')}.parquet"
+    out_path = os.path.join(gold_feature_store_directory, out_name)
+    fin_out.write.mode("overwrite").parquet(out_path)
+    print(f"[Gold-Financials] rows={fin_out.count()} saved={out_path}")
+    return fin_out
+
+'''def build_gold_feature_store(snapshot_date_str,
                              gold_label_store_directory,
                              silver_clickstream_directory,
                              silver_attributes_directory,
@@ -227,7 +413,7 @@ def build_gold_feature_store(snapshot_date_str,
     return feature_df
 
 
-'''import os
+import os
 import glob
 import pandas as pd
 import matplotlib.pyplot as plt
