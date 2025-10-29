@@ -460,20 +460,6 @@ with DAG(
 
         prod_gate >> run_inference >> model_inference_completed
 
-    '''# =========================
-    # MODEL INFERENCE
-    # =========================
-    with TaskGroup(group_id="model_inference") as model_inference:
-        model_inference_start = EmptyOperator(task_id="model_inference_start")
-        model_1_inference = EmptyOperator(task_id="model_1_inference")
-        model_2_inference = EmptyOperator(task_id="model_2_inference")
-        model_inference_completed = EmptyOperator(task_id="model_inference_completed")
-    
-        # Define task dependencies to run scripts sequentially
-        model_inference_start >> model_1_inference >> model_inference_completed
-        model_inference_start >> model_2_inference >> model_inference_completed'''
-
-
     # =========================
     # MODEL MONITORING
     # =========================

@@ -1,4 +1,7 @@
 # scripts/train_lightgbm.py
+import mlflow
+import mlflow.sklearn  # works for pipelines containing xgboost/lightgbm
+from mlflow.models import infer_signature
 import argparse, os, json
 from datetime import datetime
 import numpy as np
@@ -164,7 +167,50 @@ def main(args):
     outdir = os.path.join(args.model_bank_dir, model_version)
     os.makedirs(outdir, exist_ok=True)
 
-    preproc = best_pipe.named_steps["prep"]
+    model_name = "credit_risk_model"    # one registry name for all flavors
+    train_date = args.model_train_date  # e.g. "2024-01-01"
+    flavor = "xgboost"  # or "lightgbm" in the LGBM script
+
+    # Build an input_example and a signature (helps with serving)
+    input_example = X_test.head(5)
+    sig = infer_signature(input_example, best_pipe.predict_proba(input_example)[:, 1])
+
+    mlflow.set_experiment("credit_risk_training")  # creates if not exists
+    with mlflow.start_run(run_name=f"{flavor}_{train_date.replace('-','_')}") as run:
+        # Params & metrics
+        mlflow.log_params(search.best_params_)
+        mlflow.log_metrics({
+            "auc_train": float(auc_train),
+            "auc_test":  float(auc_test),
+            "auc_oot":   float(auc_oot),
+            "gini_train": float(gini_train),
+            "gini_test":  float(gini_test),
+            "gini_oot":   float(gini_oot),
+        })
+
+        # Tags to enable “same training date only” selection
+        mlflow.set_tags({
+            "train_date": train_date,
+            "flavor": flavor,
+            "source": "airflow",
+        })
+
+        # Log pipeline as an MLflow Model and register it (auto-versions)
+        mlflow.sklearn.log_model(
+            sk_model=best_pipe,
+            artifact_path="model",
+            registered_model_name=model_name,
+            signature=sig,
+            input_example=input_example
+        )
+
+        # (Optional) also log your CSVs / charts for convenience
+        mlflow.log_artifact(os.path.join(outdir, "X_test_preprocessed.csv"))
+        mlflow.log_artifact(os.path.join(outdir, "auc_line.png"))
+
+    print(f"[MLflow] Logged & registered under '{model_name}' with tags(train_date={train_date}, flavor={flavor})")
+
+    '''preproc = best_pipe.named_steps["prep"]
     feat_names = preproc.get_feature_names_out()
     X_train_pp = pd.DataFrame(preproc.transform(X_train), columns=feat_names, index=X_train.index)
     X_test_pp  = pd.DataFrame(preproc.transform(X_test),  columns=feat_names, index=X_test.index)
@@ -176,7 +222,7 @@ def main(args):
 
     X_train_pp.to_csv(os.path.join(outdir, "X_train_preprocessed.csv"), index=False)
     X_test_pp.to_csv(os.path.join(outdir, "X_test_preprocessed.csv"), index=False)
-    X_oot_pp.to_csv(os.path.join(outdir, "X_oot_preprocessed.csv"), index=False)
+    X_oot_pp.to_csv(os.path.join(outdir, "X_oot_preprocessed.csv"), index=False)'''
 
     artefact = {
         "pipeline": best_pipe,

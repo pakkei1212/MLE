@@ -4,25 +4,45 @@ from airflow.operators.empty import EmptyOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
+from airflow.operators.python import BranchPythonOperator
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.operators.python import ShortCircuitOperator
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import os, re
+import glob
 
 # -----------------------------
 # Configurable knobs
 # -----------------------------
 MIN_MONTHS_REQUIRED = 14
-GOLD_CLICK_BASE = Path("/opt/airflow/scripts/datamart/gold/clickstream")
-GOLD_ATTR_BASE  = Path("/opt/airflow/scripts/datamart/gold/attributes")
-GOLD_FIN_BASE   = Path("/opt/airflow/scripts/datamart/gold/financials")
+GOLD_CLICK_BASE = Path("/opt/airflow/scripts/datamart/gold/features/clickstream")
+GOLD_ATTR_BASE  = Path("/opt/airflow/scripts/datamart/gold/features/attributes")
+GOLD_FIN_BASE   = Path("/opt/airflow/scripts/datamart/gold/features/financials")
 LABEL_BASE      = Path("/opt/airflow/scripts/datamart/gold/labels")
 PROD_DIR = "/opt/airflow/scripts/model_bank/production/best"
+PREDICTIONS_BASE = Path("/opt/airflow/scripts/datamart/gold/model_predictions")
+MONITOR_OUT_DIR  = "datamart/gold/model_monitoring"
 
 # -----------------------------
 # Helpers
 # -----------------------------
+def predictions_exist_for_ds(**ctx) -> str:
+    """Branch for monitoring: if predictions exist for ds -> run monitoring, else skip."""
+    from glob import glob
+    ds = ctx["ds"]
+    patt = str(Path("/opt/airflow/scripts/datamart/gold/model_predictions") / "*" / f"*_{ds.replace('-','_')}.parquet")
+    hits = glob(patt)
+    return "model_monitor.run_monitoring" if hits else "model_monitor.skip_monitoring"
+
+def decide_next_task(**ctx) -> str:
+    needs_train = monthly_need_training(**ctx)
+    has_data    = have_min_months(**ctx)
+    if needs_train and has_data:
+        return "model_training_monthly.training_start"   # exact task_id
+    else:
+        return "infer_only_entry"          # exact task_id
+    
 def monthly_skip_training(**ctx) -> bool:
     # True means: we are NOT running monthly training this schedule
     return not monthly_need_training(**ctx)
@@ -75,10 +95,43 @@ def monthly_need_training(**ctx) -> bool:
     return should_run
 
 def _month_str(dt: datetime) -> str:
-    return dt.strftime("%Y-%m")
+    return dt.strftime("%Y_%m")
 
 def _part_exists(base: Path, ym: str) -> bool:
-    return (base / ym).exists() or any(p.name.startswith(ym) for p in base.glob(f"{ym}*"))
+    """
+    Robust month presence check.
+
+    Works with:
+      - base/YYYY-MM[/...]
+      - files/dirs starting with 'YYYY-MM'
+      - files containing 'YYYY_MM' (underscore) anywhere (e.g., *_YYYY_MM_*.parquet)
+      - files containing compact 'YYYYMM'
+    """
+    ym = str(ym or "").strip()
+    if not ym:
+        return False
+
+    dash = ym                           # '2023-01'
+    us   = ym.replace("-", "_")         # '2023_01'
+    comp = ym.replace("-", "")          # '202301'
+
+    # Exact directory match
+    if (base / dash).exists():
+        return True
+
+    # Prefix directory/file match with dash form
+    if any(base.glob(f"{dash}*")):
+        return True
+
+    # Common underscore-in-filename variants (day-level also handled)
+    if any(base.glob(f"*{us}*.parquet")):
+        return True
+
+    # Compact month token in filenames (last resort)
+    if any(base.glob(f"*{comp}*.parquet")):
+        return True
+
+    return False
 
 def have_min_months(**kwargs) -> bool:
     ds = kwargs["ds"]  # 'YYYY-MM-DD'
@@ -143,6 +196,7 @@ with DAG(
     dag.params.update({"run_training": False})
 
     start = EmptyOperator(task_id="start")
+    end = EmptyOperator(task_id="end")
 
     # =========================
     # LABEL STORE PIPELINE
@@ -299,14 +353,14 @@ with DAG(
     # SCHEDULED MONTHLY TRAINING BRANCH (new gate)
     # Skip if last training < 3 months ago
     # =========================================================
-    monthly_need_training_gate = ShortCircuitOperator(
-        task_id="monthly_need_training_gate",
-        python_callable=monthly_need_training,
-    )
-    monthly_check_min_12m = ShortCircuitOperator(
-        task_id="monthly_check_min_12m",
-        python_callable=have_min_months,
-    )
+    #monthly_need_training_gate = ShortCircuitOperator(
+    #    task_id="monthly_need_training_gate",
+    #    python_callable=monthly_need_training,
+    #)
+    #monthly_check_min_12m = ShortCircuitOperator(
+    #    task_id="monthly_check_min_12m",
+    #    python_callable=have_min_months,
+    #)
 
     # =========================================================
     # MANUAL / AD-HOC TRAINING BRANCH (unchanged behavior)
@@ -392,6 +446,8 @@ with DAG(
     # =========================================================
     with TaskGroup(group_id="model_training_monthly") as model_training_monthly:
 
+        training_start = EmptyOperator(task_id="training_start")
+
         build_pretrain_from_gold_monthly = BashOperator(
             task_id="build_pretrain_from_gold_monthly",
             bash_command=(
@@ -451,36 +507,48 @@ with DAG(
             trigger_rule=TriggerRule.ALL_SUCCESS,
         )
 
-        build_pretrain_from_gold_monthly >> [train_xgb_monthly, train_logreg_monthly] >> promote_best_monthly >> training_done_monthly
+        training_start >> build_pretrain_from_gold_monthly >> [train_xgb_monthly, train_logreg_monthly] >> promote_best_monthly >> training_done_monthly
     
-    # Gate that succeeds only when we do NOT need monthly training
+    '''# Gate that succeeds only when we do NOT need monthly training
     monthly_skip_training_gate = ShortCircuitOperator(
         task_id="monthly_skip_training_gate",
         python_callable=monthly_skip_training,
     )
 
+    # NEW: a marker that only runs (SUCCESS) when the gate returns True.
+    skip_training_marker = EmptyOperator(task_id="skip_training_marker")'''
+
+    # IMPORTANT: wire the marker (not inference_entry) as the *direct* downstream
+    #monthly_skip_training_gate >> skip_training_marker
+
     # Data readiness for inference (always required)
-    data_ready_for_inference = EmptyOperator(task_id="data_ready_for_inference")
+    data_ready = EmptyOperator(task_id="data_ready")
 
     # Join node that releases inference when EITHER monthly training finished
     # OR we explicitly skipped monthly training. It tolerates the other path being skipped.
-    inference_entry = EmptyOperator(
-        task_id="inference_entry",
-        trigger_rule=getattr(TriggerRule, "NONE_FAILED_MIN_ONE_SUCCESS", TriggerRule.ONE_SUCCESS),
-    )
+    #inference_entry = EmptyOperator(
+    #    task_id="inference_entry",
+    #    trigger_rule=getattr(TriggerRule, "NONE_FAILED_MIN_ONE_SUCCESS", TriggerRule.ONE_SUCCESS),
+    #)
 
     # =========================
     # MODEL INFERENCE (always when prod exists)
     # =========================
     with TaskGroup(group_id="model_inference") as model_inference:
 
-        pretrain_for_scoring = BashOperator(
-            task_id="pretrain_for_scoring",
+        inference_start = EmptyOperator(
+            task_id="inference_start",
+            trigger_rule=getattr(TriggerRule, "NONE_FAILED_MIN_ONE_SUCCESS", TriggerRule.ONE_SUCCESS),
+        )
+
+        pretrain_gold_for_infer = BashOperator(
+            task_id="pretrain_gold_for_infer",
             bash_command=(
                 "cd /opt/airflow/scripts && "
                 'python3 pretrain_gold_features.py '
                 '--snapshotdate "{{ ds }}" --mob 6'
             ),
+            trigger_rule=getattr(TriggerRule, "NONE_FAILED_MIN_ONE_SUCCESS", TriggerRule.ONE_SUCCESS),
         )
 
         prod_gate = ShortCircuitOperator(
@@ -497,6 +565,7 @@ with DAG(
                 "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
                 "--model-bank-dir model_bank/ "
                 "--predictions-out-dir datamart/gold/model_predictions/ "
+                "--gold-labels-dir datamart/gold/labels/ "
                 "--use-production"
             ),
         )
@@ -506,37 +575,62 @@ with DAG(
             trigger_rule=TriggerRule.ALL_SUCCESS,
         )
 
-        pretrain_for_scoring >> prod_gate >> run_inference >> model_inference_completed
+        inference_start >> pretrain_gold_for_infer >> prod_gate >> run_inference >> model_inference_completed
 
     # =========================
     # MODEL MONITORING
     # =========================
     with TaskGroup(group_id="model_monitor") as model_monitor:
         model_monitor_start = EmptyOperator(task_id="model_monitor_start")
-        model_1_monitor = EmptyOperator(task_id="model_1_monitor")
-        model_2_monitor = EmptyOperator(task_id="model_2_monitor")
-        model_monitor_completed = EmptyOperator(task_id="model_monitor_completed")
 
-        model_monitor_start >> model_1_monitor >> model_monitor_completed
-        model_monitor_start >> model_2_monitor >> model_monitor_completed
+        monitor_perf = BashOperator(
+            task_id="monitor_performance_label_free",
+            bash_command=(
+                "cd /opt/airflow/scripts && "
+                "python3 monitor_model_performance.py "
+                "--predictions-dir datamart/gold/model_predictions/ "
+                "--out-dir datamart/gold/model_monitoring/ "
+                "--window-months 12 "
+                "--end-date \"{{ ds }}\" "      # <<< tie window end to the schedule date
+                "--enable-drift"                # optional
+            ),
+        )
+
+        model_monitor_completed = EmptyOperator(task_id="model_monitor_completed", trigger_rule=TriggerRule.ALL_SUCCESS)
+
+        model_monitor_start >> monitor_perf >> model_monitor_completed
+
+    # ==== Wire into your graph ========================================
+    # wherever you connect model_inference currently:
+    model_inference >> model_monitor
+    # (No other changes needed to your existing branching)
 
     # =========================
     # Top-level dependencies
     # =========================
-    start >> [label_store, feature_store]
-
-    # Manual/ad-hoc training path (requires flag + min months)
-    [label_store, feature_store] >> manual_training_gate >> manual_check_min_12m >> model_training_manual
+    start >> [label_store, feature_store] >> data_ready  
 
     # Scheduled monthly training path (no flag; only min months guard)
-    [label_store, feature_store] >> monthly_need_training_gate >> monthly_check_min_12m >> model_training_monthly
+    #[label_store, feature_store] >> monthly_need_training_gate >> monthly_check_min_12m >> model_training_monthly
 
-    training_done_monthly >> inference_entry
-    monthly_skip_training_gate >> inference_entry
+    # Manual/ad-hoc training path (requires flag + min months)
+    data_ready >> manual_training_gate >> manual_check_min_12m >> model_training_manual >> end
 
-    # Inference runs each schedule if production exists
-    [label_store, feature_store] >> data_ready_for_inference
-    [data_ready_for_inference, inference_entry] >> model_inference
+    branch_train_or_infer = BranchPythonOperator(
+        task_id="branch_train_or_infer",
+        python_callable=decide_next_task,
+    )
 
-    # Monitoring after inference
-    model_inference >> model_monitor
+    # A tiny entry used ONLY for the infer-only path, so the branch doesn't touch the inference group
+    infer_only_entry = EmptyOperator(task_id="infer_only_entry")
+
+    data_ready >> branch_train_or_infer
+
+    # Send the branch decision to the chosen branch starts
+    branch_train_or_infer >> model_training_monthly
+    branch_train_or_infer >> infer_only_entry
+
+    model_training_monthly >> model_inference
+    infer_only_entry >> model_inference
+
+    model_inference >> model_monitor >> end
