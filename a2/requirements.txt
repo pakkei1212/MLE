@@ -4,7 +4,7 @@ pandas==2.2.3
 scipy==1.15.1
 scikit-learn==1.5.2
 xgboost==2.1.1
-lightgbm==4.5.0 
+lightgbm==4.5.0
 
 # Arrow (needed by pandas & PySpark toPandas)
 pyarrow>=16.1.0,<18.0.0
@@ -20,4 +20,11 @@ jupyterlab==4.3.5
 # Spark
 pyspark==3.5.5
 
-mlflow==2.16.0
+# ML Metrics and Model Tracking
+mlflow>=2.8.0
+psycopg2-binary>=2.9.0
+hyperopt>=0.2.7
+
+# Monitoring and Metrics
+prometheus-client>=0.17.0
+statsd>=4.0.1

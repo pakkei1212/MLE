@@ -342,7 +342,7 @@ with DAG(
             task_id="train_xgboost",
             bash_command=(
                 "cd /opt/airflow/scripts && "
-                'python3 train_xgboost.py '
+                'python3 train_xgboost_ml.py '
                 '--model-train-date "{{ ds }}" '
                 "--train-test-months 12 "
                 "--oot-months 2 "

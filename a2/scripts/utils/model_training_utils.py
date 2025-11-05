@@ -3,6 +3,9 @@ import os, io, json, glob, base64, tempfile
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
+import mlflow
+from mlflow.tracking import MlflowClient
+import numpy as np
 import numpy as np
 import pandas as pd
 import cloudpickle as cp
@@ -138,33 +141,82 @@ def write_model_registry_row(
 def maybe_promote_to_production(
     artefact: dict,
     version_str: str,
-    production_dir: str = "model_bank/production/best",
-    epsilon: float = 1e-6
+    model_name: str = "credit_risk_model",
+    epsilon: float = 1e-6,
 ) -> bool:
-    """Promote if OOT AUC is strictly better than current production by > epsilon."""
-    os.makedirs(production_dir, exist_ok=True)
+    """
+    Promote to MLflow Production stage if the new OOT AUC is better than the
+    current Production model by > epsilon. Operates fully inside MLflow.
+    """
+    client = MlflowClient()
+    tracking_uri = mlflow.get_tracking_uri()
+    print(f"[PROMOTE] Using MLflow tracking URI: {tracking_uri}")
 
     new_auc = float(artefact.get("results", {}).get("auc_oot", float("nan")))
-    prod_metrics_path = os.path.join(production_dir, "metrics.json")
-    cur = load_json_safe(prod_metrics_path)
-    cur_auc = float(cur.get("auc_oot", float("-inf")))
+    if np.isnan(new_auc):
+        print("[PROMOTE] Skip. New model has invalid OOT AUC.")
+        return False
 
-    if not np.isnan(new_auc) and (new_auc > cur_auc + epsilon):
-        # Write model.pkl atomically
-        pkl_bytes = cp.dumps(artefact)
-        atomic_write_bytes(os.path.join(production_dir, "model.pkl"), pkl_bytes)
-        # Write metrics + metadata
-        atomic_write_json(os.path.join(production_dir, "metrics.json"), artefact["results"])
-        art_sanitized = {k: v for k, v in artefact.items() if k != "pipeline"}
-        atomic_write_json(os.path.join(production_dir, "artefact.json"), art_sanitized)
-        atomic_write_bytes(os.path.join(production_dir, "model_version.txt"),
-                           (version_str + "\n").encode("utf-8"))
-        print(f"[PROMOTE] New production model: {version_str} (OOT AUC {new_auc:.4f} > {cur_auc:.4f})")
+    # --------------------------------------------------------
+    # Get current Production model version and its auc_oot
+    # --------------------------------------------------------
+    try:
+        prod_versions = client.get_latest_versions(model_name, stages=["Production"])
+        if prod_versions:
+            prod_ver = prod_versions[0]
+            prod_run_id = prod_ver.run_id
+            cur_metrics = client.get_run(prod_run_id).data.metrics
+            cur_auc = float(cur_metrics.get("auc_oot", float("-inf")))
+            cur_ver_num = prod_ver.version
+        else:
+            cur_auc, cur_ver_num = float("-inf"), None
+    except Exception as e:
+        print(f"[PROMOTE] No current Production version found ({e}).")
+        cur_auc, cur_ver_num = float("-inf"), None
+
+    # --------------------------------------------------------
+    # Compare and promote if better
+    # --------------------------------------------------------
+    if new_auc > cur_auc + epsilon:
+        # Find target version in MLflow registry
+        versions = client.search_model_versions(f"name='{model_name}'")
+        target_ver = next(
+            (v for v in versions if v.version == version_str or v.run_id == version_str), None
+        )
+
+        if not target_ver:
+            print(f"[PROMOTE] Could not find model version '{version_str}' in MLflow registry.")
+            return False
+
+        client.transition_model_version_stage(
+            name=model_name,
+            version=target_ver.version,
+            stage="Production",
+            archive_existing_versions=True,
+        )
+
+        # Update the description for traceability
+        desc = (
+            f"Promoted on {datetime.now().isoformat()} | "
+            f"auc_oot={new_auc:.4f} (prev={cur_auc:.4f})"
+        )
+        client.update_model_version(
+            name=model_name,
+            version=target_ver.version,
+            description=desc,
+        )
+
+        print(
+            f"[PROMOTE] ✅ Promoted version {target_ver.version} "
+            f"to Production (AUC {new_auc:.4f} > {cur_auc:.4f})."
+        )
         return True
 
-    print(f"[PROMOTE] Skip. New OOT AUC {new_auc:.4f} not better than production {cur_auc:.4f}.")
+    print(
+        f"[PROMOTE] Skip. New OOT AUC {new_auc:.4f} "
+        f"not better than current Production {cur_auc:.4f}."
+    )
     return False
-
 # ----------------------------
 # Reporting
 # ----------------------------

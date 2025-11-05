@@ -1,134 +1,160 @@
-# scripts/promote_best.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import argparse
-import os, io, sys, json
+import os
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
+import mlflow
+from mlflow.tracking import MlflowClient
 
 from utils.model_training_utils import (
     spark_session,
-    write_model_registry_row,
     maybe_promote_to_production,
 )
 
-# --- robust loader (handles custom transformers moved out of __main__) ---
-def _load_artefact(path: str):
-    import pickle, cloudpickle
-
-    scripts_dir = "/opt/airflow/scripts"
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    try:
-        from ml_transforms import LoanTypeBinarizer  # noqa: F401
-    except Exception:
-        pass
-
-    class RedirectUnpickler(pickle.Unpickler):
-        def find_class(self, module, name):
-            if module == "__main__" and name in {"LoanTypeBinarizer"}:
-                module = "ml_transforms"
-            return super().find_class(module, name)
-
-    with open(path, "rb") as f:
-        data = f.read()
-    try:
-        return cloudpickle.loads(data)
-    except Exception:
-        return RedirectUnpickler(io.BytesIO(data)).load()
-
 
 def main(args):
-    # Inputs
-    train_date = args.train_date  # "YYYY-MM-DD"
-    date_token = train_date.replace("-", "_")  # used in model_version suffixes
+    # ------------------------------------------------------------------
+    # 0. MLflow connection setup
+    # ------------------------------------------------------------------
+    tracking_uri = (
+        args.tracking_uri
+        or os.environ.get("MLFLOW_TRACKING_URI")
+        or "http://mlflow:5000"
+    )
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient(tracking_uri)
+    print(f"[PROMOTE] Using MLflow tracking URI: {tracking_uri}")
+    print(f"[PROMOTE] Experiment: {args.experiment}")
+    print(f"[PROMOTE] Model name: {args.model_name}")
+    print(f"[PROMOTE] Target stage: {args.stage} | archive_existing={args.archive_existing}")
 
-    # Load registry parquet
-    spark = spark_session()
+    train_date = args.train_date  # e.g. "2024-09-01"
+
+    # ------------------------------------------------------------------
+    # 1. Search MLflow runs with the given train_date tag
+    # ------------------------------------------------------------------
     try:
-        reg_sdf = spark.read.parquet(args.registry_dir)
+        exp = client.get_experiment_by_name(args.experiment)
+        if not exp:
+            print(f"[PROMOTE] Experiment '{args.experiment}' not found.")
+            return
+        exp_id = exp.experiment_id
+        runs = client.search_runs(
+            experiment_ids=[exp_id],
+            filter_string=f"tags.train_date = '{train_date}'",
+            max_results=500,
+        )
     except Exception as e:
-        print(f"[PROMOTE] Registry not found or unreadable at {args.registry_dir}: {e}")
+        print(f"[PROMOTE] Failed to query MLflow runs: {e}")
         return
 
-    reg_pdf = reg_sdf.toPandas()
-    if reg_pdf.empty:
-        print("[PROMOTE] Registry is empty.")
+    if not runs:
+        print(f"[PROMOTE] No MLflow runs found for train_date={train_date}.")
         return
 
-    # Candidate rows: same training date only (match by model_version suffix)
-    # Expected versions like: credit_model_xgb_2024_01_01, credit_model_logreg_2024_01_01, credit_model_lgbm_2024_01_01
-    mask = reg_pdf["model_version"].astype(str).str.endswith(date_token)
-    cands = reg_pdf.loc[mask].copy()
-    if cands.empty:
-        print(f"[PROMOTE] No registry entries for train_date={train_date} (token={date_token}).")
+    df = pd.DataFrame(
+        [
+            {
+                "run_id": r.info.run_id,
+                "auc_train": r.data.metrics.get("auc_train"),
+                "auc_test": r.data.metrics.get("auc_test"),
+                "auc_oot": r.data.metrics.get("auc_oot"),
+                "train_test_start_date": r.data.params.get("train_test_start_date"),
+                "train_test_end_date": r.data.params.get("train_test_end_date"),
+                "oot_start_date": r.data.params.get("oot_start_date"),
+                "oot_end_date": r.data.params.get("oot_end_date"),
+            }
+            for r in runs
+        ]
+    )
+
+    df["auc_oot"] = pd.to_numeric(df["auc_oot"], errors="coerce")
+    df["auc_test"] = pd.to_numeric(df["auc_test"], errors="coerce")
+
+    # ------------------------------------------------------------------
+    # 2. Match MLflow model versions by run_id
+    # ------------------------------------------------------------------
+    versions = client.search_model_versions(f"name='{args.model_name}'")
+    run_to_version = {v.run_id: v.version for v in versions}
+    df = df[df["run_id"].isin(run_to_version.keys())]
+
+    if df.empty:
+        print(f"[PROMOTE] No registered versions found for {args.model_name} with train_date={train_date}.")
         return
 
-    # Best by auc_oot desc, tie-break by auc_test desc
-    cands["__auc_oot__"] = pd.to_numeric(cands["auc_oot"], errors="coerce")
-    cands["__auc_test__"] = pd.to_numeric(cands["auc_test"], errors="coerce")
-    cands = cands.sort_values(["__auc_oot__", "__auc_test__"], ascending=[False, False])
-    best_row = cands.iloc[0]
-    model_version = best_row["model_version"]
-    print(f"[PROMOTE] Candidate best (same-day): {model_version} | auc_oot={best_row['auc_oot']:.4f} | auc_test={best_row['auc_test']:.4f}")
+    df["model_version"] = df["run_id"].map(run_to_version)
 
-    # Load artefact for that version
-    model_dir = os.path.join(args.model_bank_dir, model_version)
-    artefact_path = os.path.join(model_dir, model_version + ".pkl")
-    if not os.path.exists(artefact_path):
-        print(f"[PROMOTE] Artefact not found: {artefact_path}")
-        return
-    artefact = _load_artefact(artefact_path)
+    # Print top 3 for transparency
+    print("\n[TOP 3 CANDIDATES]")
+    print(df.sort_values(["auc_oot", "auc_test"], ascending=[False, False]).head(3)[
+        ["model_version", "run_id", "auc_train", "auc_test", "auc_oot"]
+    ])
 
-    # Promote if strictly better than current production (uses your helper)
+    # ------------------------------------------------------------------
+    # 3. Select the best model by AUC_OOT (and AUC_TEST as tiebreaker)
+    # ------------------------------------------------------------------
+    df = df.sort_values(["auc_oot", "auc_test"], ascending=[False, False])
+    best = df.iloc[0]
+    best_run_id = best["run_id"]
+    best_ver = str(best["model_version"])
+    print(
+        f"\n[PROMOTE] Best run for train_date={train_date}: "
+        f"version={best_ver}, run_id={best_run_id}, "
+        f"auc_oot={best['auc_oot']:.4f}, auc_test={best['auc_test']:.4f}"
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Build artefact-like dict for MLflow promotion
+    # ------------------------------------------------------------------
+    artefact = {
+        "results": {
+            "auc_train": best["auc_train"],
+            "auc_test": best["auc_test"],
+            "auc_oot": best["auc_oot"],
+        },
+        "config": {
+            "train_test_start_date": best["train_test_start_date"],
+            "train_test_end_date": best["train_test_end_date"],
+            "oot_start_date": best["oot_start_date"],
+            "oot_end_date": best["oot_end_date"],
+        },
+    }
+
+    # ------------------------------------------------------------------
+    # 5. Promote the best model in MLflow registry
+    # ------------------------------------------------------------------
     promoted = maybe_promote_to_production(
-        artefact,
-        version_str=model_version,
-        production_dir=args.production_dir,
+        artefact=artefact,
+        version_str=best_ver,
+        model_name=args.model_name,
         epsilon=args.epsilon,
     )
-    print(f"[PROMOTE] promoted={promoted}")
 
-    # Append a fresh registry row reflecting this promotion attempt (and keep the same windows/metrics)
-    cfg = artefact.get("config", {})
-    promoted_flag = bool(promoted)
-    promoted_at_iso = datetime.now().astimezone().isoformat() if promoted_flag else None
-
-    # windows may be strings already in cfg (we accept both)
-    train_start = cfg.get("train_test_start_date")
-    train_end   = cfg.get("train_test_end_date")
-    oot_start   = cfg.get("oot_start_date")
-    oot_end     = cfg.get("oot_end_date")
-
-    res = artefact.get("results", {})
-    auc_train = float(res.get("auc_train", np.nan))
-    auc_test  = float(res.get("auc_test",  np.nan))
-    auc_oot   = float(res.get("auc_oot",   np.nan))
-
-    write_model_registry_row(
-        spark,
-        registry_dir=args.registry_dir,
-        model_version=model_version,
-        train_start=train_start, train_end=train_end,
-        oot_start=oot_start,     oot_end=oot_end,
-        auc_train=auc_train, auc_test=auc_test, auc_oot=auc_oot,
-        promoted_flag=promoted_flag,
-        promoted_at_iso=promoted_at_iso
-    )
-    print(f"[PROMOTE] Wrote registry row (promoted_flag={promoted_flag}) to {args.registry_dir}")
-
-    spark.stop()
-
+    if promoted:
+        # Transition to user-specified stage (default: Production)
+        client.transition_model_version_stage(
+            name=args.model_name,
+            version=best_ver,
+            stage=args.stage,
+            archive_existing_versions=bool(args.archive_existing),
+        )
+        print(f"[PROMOTE] ✅ Model version {best_ver} moved to stage '{args.stage}'.")
+    else:
+        print(f"[PROMOTE] ⚠️ Promotion skipped — not better than existing {args.stage} model.")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Promote the best same-day model from Parquet registry to production.")
-    ap.add_argument("--train-date", required=True, help="YYYY-MM-DD (choose among models trained on this date only)")
-    ap.add_argument("--registry-dir", default=os.path.join("datamart", "gold", "model_registry"), help="Parquet registry dir")
-    ap.add_argument("--model-bank-dir", default="model_bank", help="Where artefacts live (per-version subfolders)")
-    ap.add_argument("--production-dir", default=os.path.join("model_bank", "production", "best"), help="Production/best folder")
-    ap.add_argument("--epsilon", type=float, default=1e-6, help="Min OOT AUC improvement over current prod to promote")
+    ap = argparse.ArgumentParser(
+        description="Promote the best same-day MLflow model (tag=train_date) to specified stage."
+    )
+    ap.add_argument("--train-date", required=True, help="YYYY-MM-DD (match MLflow tag 'train_date')")
+    ap.add_argument("--tracking-uri", default=None, help="Fallback to $MLFLOW_TRACKING_URI or http://mlflow:5000")
+    ap.add_argument("--experiment", default="credit_risk_training")
+    ap.add_argument("--model-name", default="credit_risk_model")
+    ap.add_argument("--stage", default="Production", choices=["Staging", "Production", "Archived", "None"])
+    ap.add_argument("--archive-existing", type=int, default=1, help="1/0 to archive existing versions in target stage")
+    ap.add_argument("--epsilon", type=float, default=1e-6, help="Minimum OOT AUC improvement for promotion")
     args = ap.parse_args()
     main(args)

@@ -1,36 +1,39 @@
-# Pin both Airflow and Python version explicitly
-FROM apache/airflow:2.9.3-python3.10
+# Use the official Apache Airflow image (adjust the version as needed)
+FROM apache/airflow:2.9.3-python3.11
 
+# Switch to root to install additional packages
 USER root
+
+# Set non-interactive mode for apt-get
 ENV DEBIAN_FRONTEND=noninteractive
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Robust apt install with retries; JRE is usually enough (use -jdk- if you need javac)
-RUN set -euxo pipefail; \
-    for i in {1..3}; do \
-      apt-get update && break || sleep 5; \
-    done; \
-    apt-get install -y --no-install-recommends \
-        libgomp1 \
-        openjdk-17-jre-headless \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Install Java (OpenJDK 17 headless), procps (for 'ps'), bash, and libgomp1 for LightGBM
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openjdk-17-jdk-headless procps bash curl libgomp1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    # Ensure Spark's scripts run with bash instead of dash
+    ln -sf /bin/bash /bin/sh
 
-# Set JAVA_HOME without using which/readlink if you prefer the known Debian path
+# Set JAVA_HOME properly
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH=$PATH:$JAVA_HOME/bin
 
-# Ensure Spark’s scripts run with bash instead of dash
-# RUN ln -sf /bin/bash /bin/sh
-    
-# Set JAVA_HOME to the directory expected by Spark
-#RUN JHOME="$(dirname "$(dirname "$(readlink -f /usr/bin/javac)")")" && \
-#    ln -sfn "$JHOME" /usr/lib/jvm/java-home && \
-#    echo "Resolved JHOME = $JHOME" && \
-#    ls -ld /usr/lib/jvm/java-home && \
-#    # Must have java and javac (JDK, not just JRE)
-#    test -x "$JHOME/bin/java" && test -x "$JHOME/bin/javac" && \
-#    "$JHOME/bin/java" -version && "$JHOME/bin/javac" -version
-#ENV JAVA_HOME=/usr/lib/jvm/java-home
+# Set Spark environment variables
+ENV SPARK_HOME=/opt/spark
+ENV PYTHONPATH=$SPARK_HOME/python:$SPARK_HOME/python/lib/py4j-0.10.9.5-src.zip:$PYTHONPATH
+ENV PATH=$PATH:$SPARK_HOME/bin
+
+# Download and install Spark
+RUN curl -O https://archive.apache.org/dist/spark/spark-3.4.1/spark-3.4.1-bin-hadoop3.tgz && \
+    tar -xzf spark-3.4.1-bin-hadoop3.tgz && \
+    mv spark-3.4.1-bin-hadoop3 /opt/spark && \
+    rm spark-3.4.1-bin-hadoop3.tgz
+
+# Create necessary directories
+RUN mkdir -p /opt/spark/logs /opt/spark/work
+
+# Set permissions
+RUN chown -R airflow:root /opt/spark
 
 # Set the working directory
 WORKDIR /app
@@ -38,34 +41,11 @@ WORKDIR /app
 # Copy the requirements file into the container
 COPY requirements.txt ./
 
-# ---- Python deps (airflow user) ----
+# Switch to the airflow user before installing Python dependencies
 USER airflow
 
-# Remove any preinstalled pyarrow that might be from the base image
-RUN pip uninstall -y pyarrow || true
-
-# Upgrade pip tooling, then install *fresh* wheels that are compatible with NumPy 2
-RUN python -m pip install --upgrade pip setuptools wheel \
- && pip install --no-cache-dir -r /app/requirements.txt 
-
-# Build-time import sanity check to fail fast if ABI mismatch persists
-RUN python - <<'PY'
-import numpy as np, pandas as pd, sklearn, xgboost, scipy
-print("NumPy:", np.__version__)
-print("pandas:", pd.__version__)
-print("sklearn:", sklearn.__version__)
-print("xgboost:", xgboost.__version__)
-print("scipy:", scipy.__version__)
-PY
-
-# Expose the default JupyterLab port
-EXPOSE 8888
+# Install Python dependencies using requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create a volume mount point for notebooks
 VOLUME /app
-
-# Enable JupyterLab via environment variable
-ENV JUPYTER_ENABLE_LAB=yes
-
-# Set up the command to run JupyterLab
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--notebook-dir=/app"]
