@@ -394,9 +394,9 @@ with DAG(
                 "set -euo pipefail && "
                 "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                 "cd /opt/airflow/scripts && "
-                'python3 train_xgboost_ml.py '
+                'python3 train_xgboost.py '
                 '--model-train-date "{{ ds }}" '
-                "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 50 "
+                "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 15 "
                 "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
                 "--gold-labels-dir datamart/gold/labels/"
             ),
@@ -408,9 +408,9 @@ with DAG(
                 "set -euo pipefail && "
                 "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                 "cd /opt/airflow/scripts && "
-                'python3 train_logreg_ml.py '
+                'python3 train_logreg.py '
                 '--model-train-date "{{ ds }}" '
-                "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 50 "
+                "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 15 "
                 "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
                 "--gold-labels-dir datamart/gold/labels/"
             ),
@@ -422,7 +422,7 @@ with DAG(
                 "set -euo pipefail && "
                 "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                 "cd /opt/airflow/scripts && "
-                "python3 promote_best_ml.py "
+                "python3 promote_best.py "
                 '--train-date "{{ ds }}" '
                 "--experiment credit_risk_training "
                 "--model-name credit_risk_model "
@@ -460,9 +460,9 @@ with DAG(
                     "set -euo pipefail && "
                     "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                     "cd /opt/airflow/scripts && "
-                    'python3 train_xgboost_ml.py '
+                    'python3 train_xgboost.py '
                     '--model-train-date "{{ ds }}" '
-                    "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 50 "
+                    "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 15 "
                     "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
                     "--gold-labels-dir datamart/gold/labels/"
                 ),
@@ -474,9 +474,9 @@ with DAG(
                     "set -euo pipefail && "
                     "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                     "cd /opt/airflow/scripts && "
-                    'python3 train_logreg_ml.py '
+                    'python3 train_logreg.py '
                     '--model-train-date "{{ ds }}" '
-                    "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 50 "
+                    "--train-test-months 12 --oot-months 2 --train-ratio 0.8 --n-iter 15 "
                     "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
                     "--gold-labels-dir datamart/gold/labels/"
                 ),
@@ -488,7 +488,7 @@ with DAG(
                     "set -euo pipefail && "
                     "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                     "cd /opt/airflow/scripts && "
-                    "python3 promote_best_ml.py "
+                    "python3 promote_best.py "
                     '--train-date "{{ ds }}" '
                     "--experiment credit_risk_training "
                     "--model-name credit_risk_model "
@@ -519,10 +519,10 @@ with DAG(
                     "set -euo pipefail && "
                     "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                     "cd /opt/airflow/scripts && "
-                    "python3 model_inference_ml.py "
+                    "python3 model_inference.py "
                     '--snapshotdate "{{ ds }}" '
                     "--gold-pretrain-features-dir datamart/pretrain_gold/features/ "
-                    "--predictions-out-dir datamart/gold/model_predictions/ "
+                    # "--predictions-out-dir datamart/gold/model_predictions/ "
                     "--model-name credit_risk_model "
                     "--model-stage Production "
                     "--experiment credit_risk_inference"
@@ -541,13 +541,13 @@ with DAG(
                     "set -euo pipefail && "
                     "export MLFLOW_TRACKING_URI=http://mlflow:5000 && "
                     "cd /opt/airflow/scripts && "
-                    "python3 monitor_model_performance_ml.py "
-                    "--use-mlflow "
+                    "python3 monitor_model_performance.py "
+                    #"--use-mlflow "
                     "--mlflow-experiment credit_risk_inference "
                     "--mlflow-artifact-name predictions "   # <— folder, not a file
                     "--gold-labels-dir datamart/gold/labels/ "
                     "--end-date '{{ ds }}' "
-                    f"--out-dir {MONITOR_OUT_DIR}/ "
+                    #f"--out-dir {MONITOR_OUT_DIR}/ "
                     "--threshold 0.5"
                 ),
             )
