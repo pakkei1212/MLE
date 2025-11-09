@@ -353,6 +353,11 @@ with DAG(
             bash_command='cd /opt/airflow/scripts && python3 gold_financials.py --snapshotdate "{{ ds }}"',
         )
 
+        build_pretrain_from_gold = BashOperator(
+                task_id="build_pretrain_from_gold_monthly",
+                bash_command='cd /opt/airflow/scripts && python3 pretrain_gold_features.py --snapshotdate "{{ ds }}" --mob 6',
+        )
+
         feature_store_completed = EmptyOperator(task_id="feature_store_completed", trigger_rule=TriggerRule.ALL_DONE)
 
         dep_check_source_data_bronze_1 >> bronze_clickstream
@@ -367,7 +372,7 @@ with DAG(
         silver_attributes >> gold_attributes
         silver_financials >> gold_financials
 
-        [gold_clickstream, gold_attributes, gold_financials] >> feature_store_completed
+        [gold_clickstream, gold_attributes, gold_financials] >> build_pretrain_from_gold >> feature_store_completed
 
     # =========================
     # MANUAL / AD-HOC TRAINING (kept)
@@ -383,10 +388,10 @@ with DAG(
 
     with TaskGroup(group_id="initial_training") as initial_training:
         initial_training_start = EmptyOperator(task_id="start")
-        build_pretrain_from_gold_manual = BashOperator(
-            task_id="build_pretrain_from_gold_manual",
-            bash_command='cd /opt/airflow/scripts && python3 pretrain_gold_features.py --snapshotdate "{{ ds }}" --mob 6',
-        )
+        #build_pretrain_from_gold_manual = BashOperator(
+        #    task_id="build_pretrain_from_gold_manual",
+        #    bash_command='cd /opt/airflow/scripts && python3 pretrain_gold_features.py --snapshotdate "{{ ds }}" --mob 6',
+        #)
 
         train_xgb_manual = BashOperator(
             task_id="train_xgboost_manual",
@@ -437,7 +442,7 @@ with DAG(
 
         training_done_manual = EmptyOperator(task_id="training_done_manual", trigger_rule=TriggerRule.ALL_SUCCESS)
 
-        initial_training_start >> build_pretrain_from_gold_manual >> [train_xgb_manual, train_logreg_manual] >> promote_best_manual >> training_done_manual
+        initial_training_start >> [train_xgb_manual, train_logreg_manual] >> promote_best_manual >> training_done_manual
 
     # =========================
     # MONTHLY TRAIN / INFER / MONITOR
@@ -449,11 +454,6 @@ with DAG(
 
         with TaskGroup(group_id="model_training_monthly") as model_training_monthly:
             training_start = EmptyOperator(task_id="start")
-            build_pretrain_from_gold_monthly = BashOperator(
-                task_id="build_pretrain_from_gold_monthly",
-                bash_command='cd /opt/airflow/scripts && python3 pretrain_gold_features.py --snapshotdate "{{ ds }}" --mob 6',
-            )
-
             train_xgb_monthly = BashOperator(
                 task_id="train_xgboost_monthly",
                 bash_command=(
@@ -503,7 +503,7 @@ with DAG(
 
             training_done_monthly = EmptyOperator(task_id="end", trigger_rule=TriggerRule.ALL_SUCCESS)
 
-            training_start >> build_pretrain_from_gold_monthly >> [train_xgb_monthly, train_logreg_monthly] >> promote_best_monthly >> training_done_monthly
+            training_start >> [train_xgb_monthly, train_logreg_monthly] >> promote_best_monthly >> training_done_monthly
 
         with TaskGroup(group_id="model_inference_monthly") as model_inference_monthly:
             inference_start = EmptyOperator(task_id="start", trigger_rule=getattr(TriggerRule, "NONE_FAILED_MIN_ONE_SUCCESS", TriggerRule.ONE_SUCCESS))

@@ -79,9 +79,6 @@ services:
       - airflow_data:/opt/airflow
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
-      #- ./datamart:/opt/airflow/datamart
-      #- ./data:/opt/airflow/data
-      #- ./data/airports:/opt/airflow/data/airports
     entrypoint:
       - /bin/bash
       - -lc
@@ -116,7 +113,6 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./datamart:/opt/airflow/datamart
       - ./data:/opt/airflow/data
-      - ./data/airports:/opt/airflow/data/airports
       - mlflow_data:/tmp/mlflow
     ports:
       - "8080:8080"
@@ -147,7 +143,6 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./datamart:/opt/airflow/datamart
       - ./data:/opt/airflow/data
-      - ./data/airports:/opt/airflow/data/airports
       - mlflow_data:/tmp/mlflow
     command: scheduler
     restart: unless-stopped
