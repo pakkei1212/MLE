@@ -1,4 +1,4 @@
-# scripts/monitor_model_performance_ml.py
+# scripts/monitor_model_performance.py
 import os, argparse, sys, json
 import pandas as pd
 import numpy as np
@@ -109,7 +109,7 @@ def _log_monitoring_run(experiment_name, run_id, metrics, summary, tags):
 # Main Logic
 # --------------------------------------------------------------------
 def main(args):
-    from monitor_model_performance_ml import _load_last_month_predictions_from_mlflow, _load_labels_for_month
+    from monitor_model_performance import _load_last_month_predictions_from_mlflow, _load_labels_for_month
 
     end_date = _coerce_date(args.end_date)
     last_month = _month_floor(end_date)

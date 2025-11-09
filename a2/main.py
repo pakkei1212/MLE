@@ -14,9 +14,9 @@ import pyspark.sql.functions as F
 from pyspark.sql.functions import col
 from pyspark.sql.types import StringType, IntegerType, FloatType, DateType
 
-import utils.data_processing_bronze_table
-import utils.data_processing_silver_table
-import utils.data_processing_gold_table
+import scripts.utils.data_processing_bronze_table
+import scripts.utils.data_processing_silver_table
+import scripts.utils.data_processing_gold_table
 
 # Initialize SparkSession
 spark = pyspark.sql.SparkSession.builder \
