@@ -1,0 +1,5 @@
+docker compose exec -T postgres psql -U airflow -d airflow -c "\dt"
+docker compose exec -T postgres-mlflow psql -U mlflow -d mlflow -c "\dt"
+docker compose exec -T postgres-mlflow psql -U mlflow -d postgres -c "\l"
+docker compose logs --tail=200 mlflow
+curl http://localhost:5000/api/2.0/mlflow/experiments/list

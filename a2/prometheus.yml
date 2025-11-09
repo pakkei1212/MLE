@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # Airflow metrics
+  - job_name: 'airflow'
+    static_configs:
+      - targets: ['airflow-webserver:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # MLflow metrics
+  - job_name: 'mlflow'
+    static_configs:
+      - targets: ['mlflow:5000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # PostgreSQL metrics (if using postgres_exporter)
+  # - job_name: 'postgres'
+  #   static_configs:
+  #     - targets: ['postgres:5432']
+  #   scrape_interval: 30s
+
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090'] 

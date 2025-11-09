@@ -1,0 +1,223 @@
+services:
+  postgres:
+    container_name: a2-postgres
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      #- ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  postgres-mlflow:
+    container_name: a2-postgres-mlflow
+    image: postgres:13
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - postgres_mlflow_data:/var/lib/postgresql/data
+      # - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mlflow"]
+      interval: 10s
+      retries: 5
+
+  mlflow:
+    container_name: a2-mlflow
+    image: python:3.9-slim
+    depends_on:
+      postgres-mlflow:
+        condition: service_healthy
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/tmp/mlflow/artifacts
+      - GIT_PYTHON_REFRESH=quiet
+      - MLFLOW_ENABLE_MODEL_DELETION=true
+    volumes:
+      - mlflow_data:/tmp/mlflow
+      - ./scripts:/opt/airflow/scripts
+    ports:
+      - "5000:5000"
+    command: >
+      bash -c "apt-get update && apt-get install -y curl &&
+      pip install mlflow psycopg2-binary &&
+      mkdir -p /tmp/mlflow/artifacts &&
+      chmod -R 777 /tmp/mlflow &&
+      mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://mlflow:mlflow@postgres-mlflow:5432/mlflow --default-artifact-root /tmp/mlflow/artifacts --artifacts-destination /tmp/mlflow/artifacts --serve-artifacts"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  airflow-init:
+    container_name: a2-airflow-init
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      #- ./datamart:/opt/airflow/datamart
+      #- ./data:/opt/airflow/data
+      #- ./data/airports:/opt/airflow/data/airports
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - >
+        airflow db init &&
+        airflow users create --username admin --password admin
+        --firstname Admin --lastname User --role Admin
+        --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    container_name: a2-airflow-webserver
+    build: .
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./datamart:/opt/airflow/datamart
+      - ./data:/opt/airflow/data
+      - ./data/airports:/opt/airflow/data/airports
+      - mlflow_data:/tmp/mlflow
+    ports:
+      - "8080:8080"
+    command: webserver
+    restart: unless-stopped
+
+  airflow-scheduler:
+    container_name: a2-airflow-scheduler
+    build: .
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./datamart:/opt/airflow/datamart
+      - ./data:/opt/airflow/data
+      - ./data/airports:/opt/airflow/data/airports
+      - mlflow_data:/tmp/mlflow
+    command: scheduler
+    restart: unless-stopped
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    container_name: a2-prometheus
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+
+  # Grafana for metrics visualization (optional)
+  grafana:
+    container_name: a2-grafana
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  pgadmin:
+    container_name: a2-pgadmin
+    image: dpage/pgadmin4
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  lab:
+    container_name: a2-jupyter
+    image: jupyter/pyspark-notebook:latest
+    ports:
+      - "8892:8892"
+    volumes:
+      - .:/app
+    working_dir: /app
+    command:
+      - start-notebook.sh
+      - --ServerApp.ip=0.0.0.0
+      - --ServerApp.port=8892
+      - --ServerApp.root_dir=/app
+      - --ServerApp.token=
+      - --ServerApp.password=
+      - --ServerApp.disable_check_xsrf=True
+
+volumes:
+  postgres_data: {}
+  postgres_mlflow_data: {}
+  mlflow_data: {}
+  airflow_data: {}
+  prometheus_data: {}
+  grafana_data: {}
+  pgadmin_data: {}

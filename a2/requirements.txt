@@ -1,0 +1,31 @@
+# Core
+numpy==2.2.2
+pandas==2.2.3
+scipy==1.15.1
+scikit-learn==1.5.2
+xgboost==2.1.1
+lightgbm==4.5.0
+
+# Arrow (needed by pandas & PySpark toPandas)
+pyarrow>=16.1.0,<18.0.0
+cloudpickle==3.0.0
+
+# Viz
+matplotlib==3.10.0
+seaborn==0.13.2
+
+# Notebooks
+jupyterlab==4.3.5
+
+# Spark
+pyspark==3.5.5
+
+# ML Metrics and Model Tracking
+mlflow>=2.8.0
+psycopg2-binary>=2.9.0
+hyperopt>=0.2.7
+optuna==3.6.1
+
+# Monitoring and Metrics
+prometheus-client>=0.17.0
+statsd>=4.0.1
